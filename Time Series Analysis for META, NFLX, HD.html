@@ -1,0 +1,392 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Time Series Analysis for META, NFLX, HD</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        pre {
+            background-color: #f4f4f4;
+            padding: 16px;
+            border-radius: 8px;
+            overflow-x: auto;
+        }
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans">
+    <div class="container mx-auto p-6">
+        <h1 class="text-3xl font-bold text-gray-800 mb-4">Time Series Analysis for META, NFLX, HD</h1>
+        <p class="text-gray-600 mb-6">
+            Below is the Python code used to perform a comprehensive time series analysis of the closing prices of META, NFLX, and HD stocks. The code includes data loading, stationarity tests, correlogram analysis, cointegration testing, ARIMA modeling, and forecasting, with visualizations of historical data and predictions. It was originally designed to run in Google Colab, where it prompts the user to upload Excel files and specify the column containing closing prices.
+        </p>
+        <pre><code>
+# Import required libraries
+import pandas as pd
+import numpy as np
+from google.colab import files
+import statsmodels.api as sm
+from statsmodels.tsa.stattools import adfuller, kpss, acf, pacf
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.vector_ar.vecm import coint_johansen
+import matplotlib.pyplot as plt
+
+# Upload Excel files for META, NFLX, HD
+print("Please upload META Excel file")
+meta_upload = files.upload()
+meta_filename = list(meta_upload.keys())[0]
+meta_df = pd.read_excel(meta_filename)
+
+print("Please upload NFLX Excel file")
+nflx_upload = files.upload()
+nflx_filename = list(nflx_upload.keys())[0]
+nflx_df = pd.read_excel(nflx_filename)
+
+print("Please upload HD Excel file")
+hd_upload = files.upload()
+hd_filename = list(hd_upload.keys())[0]
+hd_df = pd.read_excel(hd_filename)
+
+# Print available columns
+print("\nMETA DataFrame columns:", list(meta_df.columns))
+print("NFLX DataFrame columns:", list(nflx_df.columns))
+print("HD DataFrame columns:", list(hd_df.columns))
+
+# Ask user for the correct column name
+close_column = input("Please enter the column name containing closing prices: ")
+
+# Extract and clean closing prices
+try:
+    meta_close = meta_df[close_column]
+    nflx_close = nflx_df[close_column]
+    hd_close = hd_df[close_column]
+
+    # Convert to numeric, coercing errors to NaN
+    meta_close = pd.to_numeric(meta_close, errors='coerce')
+    nflx_close = pd.to_numeric(nflx_close, errors='coerce')
+    hd_close = pd.to_numeric(hd_close, errors='coerce')
+
+    # Check for non-numeric values
+    if meta_close.isna().any():
+        print(f"Warning: META {close_column} contains {meta_close.isna().sum()} non-numeric or missing values")
+    if nflx_close.isna().any():
+        print(f"Warning: NFLX {close_column} contains {nflx_close.isna().sum()} non-numeric or missing values")
+    if hd_close.isna().any():
+        print(f"Warning: HD {close_column} contains {hd_close.isna().sum()} non-numeric or missing values")
+
+    # Drop NaN values
+    meta_close = meta_close.dropna()
+    nflx_close = nflx_close.dropna()
+    hd_close = hd_close.dropna()
+except KeyError:
+    print(f"Error: Column '{close_column}' not found in one or more DataFrames")
+    print("Please check the column names and try again")
+    raise
+
+# Ensure all series have the same length
+min_length = min(len(meta_close), len(nflx_close), len(hd_close))
+meta_close = meta_close[:min_length]
+nflx_close = nflx_close[:min_length]
+hd_close = hd_close[:min_length]
+
+# Function for unit root tests with interpretation and table
+def unit_root_tests(series, name):
+    print(f"\nUnit Root Tests for {name}:")
+
+    # ADF Test
+    adf_result = adfuller(series)
+    print("ADF Test:")
+    print(f'ADF Statistic: {adf_result[0]:.4f}')
+    print(f'p-value: {adf_result[1]:.4f}')
+    print(f'Critical Values: {adf_result[4]}')
+    print("Interpretation:")
+    adf_conclusion = "Stationary" if adf_result[1] < 0.05 else "Non-stationary"
+    if adf_result[1] < 0.05:
+        print(f"  - p-value < 0.05: Reject null hypothesis - {name} is stationary")
+    else:
+        print(f"  - p-value >= 0.05: Fail to reject null - {name} may be non-stationary")
+
+    # KPSS Test
+    kpss_result = kpss(series)
+    print("\nKPSS Test:")
+    print(f'KPSS Statistic: {kpss_result[0]:.4f}')
+    print(f'p-value: {kpss_result[1]:.4f}')
+    print(f'Critical Values: {kpss_result[3]}')
+    print("Interpretation:")
+    kpss_conclusion = "Stationary" if kpss_result[1] >= 0.05 else "Non-stationary"
+    if kpss_result[1] < 0.05:
+        print(f"  - p-value < 0.05: Reject null hypothesis - {name} is non-stationary")
+    else:
+        print(f"  - p-value >= 0.05: Fail to reject null - {name} may be stationary")
+
+    # Summary table
+    summary_table = pd.DataFrame({
+        'Test': ['ADF', 'KPSS'],
+        'Statistic': [adf_result[0], kpss_result[0]],
+        'p-value': [adf_result[1], kpss_result[1]],
+        'Conclusion': [adf_conclusion, kpss_conclusion]
+    })
+    print(f"\n{name} Stationarity Summary:")
+    print(summary_table)
+
+    return adf_result, kpss_result
+
+# Perform unit root tests and collect results
+meta_adf, meta_kpss = unit_root_tests(meta_close, "META")
+nflx_adf, nflx_kpss = unit_root_tests(nflx_close, "NFLX")
+hd_adf, hd_kpss = unit_root_tests(hd_close, "HD")
+
+# Function for correlogram (ACF and PACF)
+def correlogram(series, name, lags=10):
+    acf_values = acf(series, nlags=lags, fft=False)
+    pacf_values = pacf(series, nlags=lags)
+
+    # Create table
+    corr_table = pd.DataFrame({
+        'Lag': range(1, lags + 1),
+        'ACF': acf_values[1:lags + 1],
+        'PACF': pacf_values[1:lags + 1]
+    })
+    print(f"\nCorrelogram for {name} (first {lags} lags):")
+    print(corr_table)
+
+    # Plot ACF and PACF
+    plt.figure(figsize=(12, 6))
+    plt.subplot(121)
+    plt.stem(range(1, lags + 1), acf_values[1:lags + 1])
+    plt.title(f'{name} ACF')
+    plt.xlabel('Lag')
+    plt.ylabel('Autocorrelation')
+
+    plt.subplot(122)
+    plt.stem(range(1, lags + 1), pacf_values[1:lags + 1])
+    plt.title(f'{name} PACF')
+    plt.xlabel('Lag')
+    plt.ylabel('Partial Autocorrelation')
+    plt.tight_layout()
+    plt.show()
+
+# Perform correlogram analysis
+correlogram(meta_close, "META")
+correlogram(nflx_close, "NFLX")
+correlogram(hd_close, "HD")
+
+# Cointegration test with interpretation and table
+def cointegration_test(df):
+    result = coint_johansen(df, det_order=0, k_ar_diff=1)
+    print("\nJohansen Cointegration Test:")
+    print(f"Trace statistic: {result.lr1}")
+    print(f"Critical values (90%, 95%, 99%): {result.cvt}")
+    print("Interpretation:")
+
+    # Create table
+    coint_table = pd.DataFrame({
+        'Rank': [f'r <= {i}' for i in range(len(result.lr1))],
+        'Trace Statistic': result.lr1,
+        '95% Critical Value': result.cvt[:, 1],
+        'Conclusion': ['Cointegrated' if result.lr1[i] > result.cvt[i, 1] else 'Not Cointegrated' for i in range(len(result.lr1))]
+    })
+
+    for i in range(len(result.lr1)):
+        if result.lr1[i] > result.cvt[i, 1]:
+            print(f"  - r = {i}: Cointegration exists at 95% confidence level")
+            print(f"    Trace statistic ({result.lr1[i]:.2f}) > 95% critical value ({result.cvt[i, 1]:.2f})")
+        else:
+            print(f"  - r = {i}: No cointegration at 95% confidence level")
+            print(f"    Trace statistic ({result.lr1[i]:.2f}) <= 95% critical value ({result.cvt[i, 1]:.2f})")
+
+    print("\nCointegration Summary Table:")
+    print(coint_table)
+
+    if result.lr1[0] > result.cvt[0, 1]:
+        print("Conclusion: META, NFLX, and HD are cointegrated - they share a long-run equilibrium relationship")
+    else:
+        print("Conclusion: No evidence of cointegration among META, NFLX, and HD")
+
+# Prepare data for cointegration
+coint_df = pd.DataFrame({
+    'META': meta_close,
+    'NFLX': nflx_close,
+    'HD': hd_close
+}).dropna()
+cointegration_test(coint_df)
+
+# Function to find best ARIMA model with interpretation
+def find_best_arima(series, name, max_p=3, max_d=2, max_q=3):
+    best_aic = float('inf')
+    best_order = None
+
+    for p in range(max_p + 1):
+        for d in range(max_d + 1):
+            for q in range(max_q + 1):
+                try:
+                    model = ARIMA(series, order=(p, d, q))
+                    results = model.fit()
+                    if results.aic < best_aic:
+                        best_aic = results.aic
+                        best_order = (p, d, q)
+                except:
+                    continue
+
+    print(f"\nBest ARIMA model for {name}:")
+    print(f"Order: {best_order}")
+    print(f"AIC: {best_aic:.2f}")
+    print("Interpretation:")
+    print(f"  - p={best_order[0]}: {best_order[0]} autoregressive term(s)")
+    print(f"  - d={best_order[1]}: {best_order[1]} difference(s) needed for stationarity")
+    print(f"  - q={best_order[2]}: {best_order[2]} moving average term(s)")
+    return best_order
+
+# Find and fit best ARIMA models
+meta_order = find_best_arima(meta_close, "META")
+nflx_order = find_best_arima(nflx_close, "NFLX")
+hd_order = find_best_arima(hd_close, "HD")
+
+# Fit final ARIMA models
+meta_model = ARIMA(meta_close, order=meta_order).fit()
+nflx_model = ARIMA(nflx_close, order=nflx_order).fit()
+hd_model = ARIMA(hd_close, order=hd_order).fit()
+
+# Forecast next 30 periods
+forecast_steps = 30
+meta_forecast = meta_model.forecast(steps=forecast_steps)
+nflx_forecast = nflx_model.forecast(steps=forecast_steps)
+hd_forecast = hd_model.forecast(steps=forecast_steps)
+
+# Create forecast index
+last_index = len(meta_close) - 1
+forecast_index = range(last_index + 1, last_index + 1 + forecast_steps)
+
+# Plot original series
+plt.figure(figsize=(12,6))
+plt.plot(meta_close, label='META')
+plt.plot(nflx_close, label='NFLX')
+plt.plot(hd_close, label='HD')
+plt.title('META, NFLX, and HD Closing Prices')
+plt.legend()
+plt.show()
+
+# Plot differenced series
+meta_diff = meta_close.diff().dropna()
+nflx_diff = nflx_close.diff().dropna()
+hd_diff = hd_close.diff().dropna()
+
+plt.figure(figsize=(12,6))
+plt.plot(meta_diff, label='META Diff')
+plt.plot(nflx_diff, label='NFLX Diff')
+plt.plot(hd_diff, label='HD Diff')
+plt.title('Differenced Series')
+plt.legend()
+plt.show()
+
+# Plot original series with forecasts (log scale)
+plt.figure(figsize=(12,6))
+plt.plot(meta_close, label='META Historical')
+plt.plot(forecast_index, meta_forecast, label='META Forecast', color='red')
+plt.plot(nflx_close, label='NFLX Historical')
+plt.plot(forecast_index, nflx_forecast, label='NFLX Forecast', color='green')
+plt.plot(hd_close, label='HD Historical')
+plt.plot(forecast_index, hd_forecast, label='HD Forecast', color='purple')
+plt.yscale('log')  # Set y-axis to logarithmic (base 10) scale
+plt.title('META, NFLX, and HD Closing Prices with Forecasts (Log Scale)')
+plt.legend()
+plt.show()
+
+# Detailed forecast plot with confidence intervals and interpretation
+def plot_forecast(model, series, name, steps=30):
+    forecast_obj = model.get_forecast(steps=steps)
+    forecast = forecast_obj.predicted_mean
+    conf_int = forecast_obj.conf_int()
+
+    forecast_index = range(len(series), len(series) + steps)
+
+    plt.figure(figsize=(12,6))
+    plt.plot(series, label=f'{name} Historical')
+    plt.plot(forecast_index, forecast, label='Forecast', color='red')
+    plt.fill_between(forecast_index,
+                    conf_int.iloc[:, 0],
+                    conf_int.iloc[:, 1],
+                    color='pink',
+                    alpha=0.3,
+                    label='95% Confidence Interval')
+    plt.title(f'{name} Price Forecast')
+    plt.legend()
+    plt.show()
+
+    # Forecast interpretation
+    last_value = series.iloc[-1]
+    mean_forecast = forecast.mean()
+    print(f"\nForecast Interpretation for {name}:")
+    print(f"Last observed value: {last_value:.2f}")
+    print(f"Average forecast value: {mean_forecast:.2f}")
+    print(f"Forecast change: {mean_forecast - last_value:.2f}")
+    if mean_forecast > last_value:
+        print("Trend: Upward forecast trend")
+    elif mean_forecast < last_value:
+        print("Trend: Downward forecast trend")
+    else:
+        print("Trend: Flat forecast trend")
+    print(f"95% CI range at period {steps}: [{conf_int.iloc[-1, 0]:.2f}, {conf_int.iloc[-1, 1]:.2f}]")
+
+# Generate detailed forecast plots and interpretations
+plot_forecast(meta_model, meta_close, "META")
+plot_forecast(nflx_model, nflx_close, "NFLX")
+plot_forecast(hd_model, hd_close, "HD")
+
+# Print forecast values
+print("\nMETA Forecast Values (next 5 periods):")
+print(meta_forecast[:5])
+print("\nNFLX Forecast Values (next 5 periods):")
+print(nflx_forecast[:5])
+print("\nHD Forecast Values (next 5 periods):")
+print(hd_forecast[:5])
+        </code></pre>
+        <p class="text-gray-600 mt-6">
+            This code performs the following tasks: it loads Excel files containing stock price data, extracts closing prices, tests for stationarity using ADF and KPSS tests, analyzes autocorrelation with correlograms, checks for cointegration among the stocks, fits ARIMA models, and generates 30-period forecasts with visualizations. The visualizations include historical price plots, differenced series plots, and forecast plots with confidence intervals. To run this code, you need a Python environment like Google Colab with the required libraries installed.
+        </p>
+    </div>
+</body>
+</html>
